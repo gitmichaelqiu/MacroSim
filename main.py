@@ -262,17 +262,79 @@ class PoliticalEngine:
             return True, "TERM LIMIT: 5 Years completed."
         return False, ""
     
-    def analyze_failure(self, df: pd.DataFrame) -> str:
+    def generate_term_report(self, df: pd.DataFrame) -> str:
+        """Generates a detailed report card of the player's term."""
         avg_inf = df['Inflation'].mean()
         avg_unemp = df['Unemployment'].mean()
+        std_inf = df['Inflation'].std()
+        
+        start_gdp = df.iloc[0]['GDP_Real']
+        end_gdp = df.iloc[-1]['GDP_Real']
+        total_growth = ((end_gdp - start_gdp) / start_gdp) * 100
         final_debt = df.iloc[-1]['Debt_to_GDP']
         
-        reasons = []
-        if avg_inf > 5.0: reasons.append(f"❌ **Runaway Inflation ({avg_inf:.1f}%)**: Rates were too low for too long.")
-        if avg_unemp > 7.0: reasons.append(f"❌ **Mass Unemployment ({avg_unemp:.1f}%)**: You suffocated the economy.")
-        if final_debt > 130.0: reasons.append(f"❌ **Fiscal Collapse ({final_debt:.1f}% Debt)**: You spent money you didn't have.")
+        # Grading Logic
+        grades = {}
+        
+        # Inflation (Target 2%, Penalty for deviation AND volatility)
+        inf_dev = abs(avg_inf - 2.0)
+        if inf_dev < 1.0 and std_inf < 1.5: grades['Inflation'] = 'A'
+        elif inf_dev < 2.0: grades['Inflation'] = 'B'
+        elif inf_dev < 4.0: grades['Inflation'] = 'C'
+        else: grades['Inflation'] = 'F'
             
-        return "\n\n".join(reasons) if reasons else "⚠️ **Volatility**: The economy swung too wildly."
+        # Unemployment (Target 5%)
+        unemp_dev = avg_unemp - 5.0
+        if unemp_dev < 0.5 and unemp_dev > -0.5: grades['Employment'] = 'A'
+        elif unemp_dev < 1.5: grades['Employment'] = 'B'
+        elif unemp_dev < 3.0: grades['Employment'] = 'C'
+        else: grades['Employment'] = 'F'
+        
+        # Fiscal (Debt < 100 is good)
+        if final_debt < 90: grades['Fiscal'] = 'A'
+        elif final_debt < 110: grades['Fiscal'] = 'B'
+        elif final_debt < 130: grades['Fiscal'] = 'C'
+        else: grades['Fiscal'] = 'D'
+        
+        # Markdown Report
+        report = f"""
+        ### 🎓 Official Term Report Card
+        
+        **Final Grades:**
+        - **Price Stability (Inflation):** {grades['Inflation']}
+        - **Full Employment:** {grades['Employment']}
+        - **Fiscal Responsibility:** {grades['Fiscal']}
+        
+        **Key Statistics:**
+        - **Avg Inflation:** {avg_inf:.1f}% (Target: 2.0%)
+        - **Avg Unemployment:** {avg_unemp:.1f}% (Target: 5.0%)
+        - **Total Real GDP Growth:** {total_growth:.1f}% over term
+        - **Ending Debt-to-GDP:** {final_debt:.1f}%
+        
+        **Economic Analysis:**
+        """
+        
+        if grades['Inflation'] == 'F':
+            report += "- ❌ **Price Instability:** You failed to anchor inflation expectations. Households struggled to plan for the future.\n"
+        elif std_inf > 2.0:
+            report += "- ⚠️ **Volatile Prices:** While average inflation was okay, the wild swings damaged business confidence.\n"
+            
+        if grades['Employment'] == 'F':
+            report += "- ❌ **Labor Market Crisis:** Unemployment was unacceptably high. This indicates a failure of Demand Management.\n"
+            
+        if grades['Fiscal'] == 'D':
+            report += "- ⚠️ **Debt Warning:** Your borrowing is unsustainable. Interest payments will crowd out future spending.\n"
+            
+        if total_growth > 15 and grades['Inflation'] in ['A', 'B']:
+            report += "- 🌟 **Golden Age:** You achieved an economic miracle! High growth with stable prices.\n"
+        elif total_growth < 0:
+            report += "- 📉 **Depression:** The economy shrank under your watch. A catastrophic failure of policy.\n"
+        elif total_growth < 5:
+            report += "- 🐌 **Stagnation:** Growth was anemic. You likely kept interest rates too high or taxes too punitive.\n"
+        else:
+            report += "- ✅ **Solid Governance:** You steered the ship safely, though greatness remained out of reach.\n"
+            
+        return report
 
 
 # ==============================================================================
@@ -374,8 +436,13 @@ class SimulationUI:
         # --- GAME OVER ---
         is_over, reason = pol.check_game_over(eco.turn)
         if is_over:
-            st.error(f"GAME OVER: {reason}")
-            st.markdown(pol.analyze_failure(df))
+            if "EJECTED" in reason:
+                st.error(f"GAME OVER: {reason}")
+            else:
+                st.success(f"CONGRATULATIONS: {reason}")
+            
+            st.markdown(pol.generate_term_report(df))
+            
             if st.button("Start New Game"):
                 st.session_state['game_active'] = False
                 st.rerun()
