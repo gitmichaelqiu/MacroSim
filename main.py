@@ -10,7 +10,7 @@ from typing import Dict, List, Tuple
 # ==============================================================================
 CONSTANTS = {
     'MPC': 0.75,          # Marginal Propensity to Consume
-    'ALPHA': 1500,        # IS Curve Sensitivity (Interest Rate Sensitivity)
+    'ALPHA': 100,         # IS Curve Sensitivity (RECALIBRATED: Was 1500, now 100 for stability)
     'BETA': 0.5,          # Phillips Curve Slope (Inflation Sensitivity)
     'GAMMA': 0.4,         # Okun's Law Coefficient
     'NATURAL_UNEMPLOYMENT': 5.0, # NAIRU (%)
@@ -40,6 +40,7 @@ class EconomyModel:
             'GDP_Nominal': 20000,   # Billions
             'GDP_Real': 20000,      # Billions
             'Potential_GDP': 20000, # Billions
+            'Output_Gap': 0.0,      # %
             'Price_Level': 100.0,
             'Inflation': 2.0,       # %
             'Unemployment': 5.0,    # %
@@ -95,14 +96,20 @@ class EconomyModel:
         # Multiplier: 1 / (1 - MPC*(1-t))
         multiplier = 1 / (1 - CONSTANTS['MPC'] * (1 - tax_rate))
         
-        # Autonomous Demand
-        autonomous_consumption = 4000 
+        # Autonomous Demand & Constants Calculation
+        # Goal: At r=2%, Tax=20%, G=4000 -> Y should be 20,000.
+        # Multiplier = 2.5. Base Demand needed = 8000.
+        # Base = C0 + I0 + G - Alpha*r
+        # 8000 = 2500 (C0) + 1700 (I0) + 4000 (G) - 100*2 (Drag)
+        
+        autonomous_consumption = 2500 
+        base_investment = 1700
         investment_sensitivity = CONSTANTS['ALPHA'] * real_interest_rate
         
         shock_val = np.random.normal(0, 50)
         scenario_demand_shock = self.state.get('Demand_Shock', 0)
         
-        base_demand = autonomous_consumption + 3000 - investment_sensitivity + gov_spending + scenario_demand_shock + shock_val
+        base_demand = autonomous_consumption + base_investment - investment_sensitivity + gov_spending + scenario_demand_shock + shock_val
         new_real_gdp = base_demand * multiplier
 
         # 4. The Phillips Curve (Aggregate Supply)
@@ -112,6 +119,7 @@ class EconomyModel:
         scenario_supply_shock = self.state.get('Supply_Shock', 0)
         random_supply_noise = np.random.normal(0, 0.2)
         
+        # Adaptive Expectations with slight persistence dampening
         new_inflation = expected_inflation + (CONSTANTS['BETA'] * output_gap_percent) + scenario_supply_shock + random_supply_noise
         
         # 5. Okun's Law (Unemployment)
@@ -141,6 +149,7 @@ class EconomyModel:
         self.state.update({
             'GDP_Real': new_real_gdp,
             'GDP_Nominal': new_nominal_gdp,
+            'Output_Gap': output_gap_percent,
             'Inflation': new_inflation,
             'Unemployment': new_unemployment,
             'Interest_Rate': nominal_rate,
@@ -195,22 +204,25 @@ class PoliticalEngine:
         inf = state['Inflation']
         unemp = state['Unemployment']
         r_rate = state['Real_Interest_Rate']
+        gap = state['Output_Gap']
         
         if inf > 8.0 and unemp > 7.0:
             return "⚠️ STAGFLATION: Prices rising AND jobs lost. Raising rates kills jobs; spending fuels inflation. Suggest: Structural reform + Careful rate hikes."
+        elif gap > 2.0:
+            return f"🔥 OVERHEATING (Gap: +{gap:.1f}%): The economy is producing way above capacity. This will cause massive inflation soon. Raise rates!"
+        elif gap < -2.0:
+            return f"❄️ RECESSION (Gap: {gap:.1f}%): We are well below potential output. Stimulate Demand via G or Tax cuts."
         elif inf > 6.0:
-            msg = "🔥 OVERHEATING: Economy is running too hot."
+            msg = "⚠️ INFLATION ALERT: "
             if r_rate < 0:
-                msg += " Your Real Interest Rate is NEGATIVE, effectively subsidizing borrowing. Raise rates!"
+                msg += "Your Real Interest Rate is NEGATIVE. You are pouring gas on the fire. Raise rates!"
             else:
-                msg += " Consider raising taxes or cutting spending."
+                msg += "Consider raising taxes or cutting spending to cool demand."
             return msg
-        elif unemp > 8.0:
-            return "❄️ RECESSION: High unemployment. Stimulate demand! If rates are near zero, use Fiscal Policy (G up, T down)."
         elif state['Debt_to_GDP'] > 120:
              return "📉 DEBT CRISIS: Debt-to-GDP is critical (>120%). Markets may lose confidence. Try to run a primary surplus."
         else:
-            return "✅ STABLE: Keep maintaining the balance. Watch the Real Interest Rate."
+            return "✅ STABLE: Keep maintaining the balance. Watch the Output Gap."
 
     def check_game_over(self, turn: int) -> Tuple[bool, str]:
         if turn < 4:
@@ -361,12 +373,12 @@ class SimulationUI:
         
         real_rate = eco.state['Real_Interest_Rate']
         debt_gdp = eco.state['Debt_to_GDP']
-        deficit = eco.state['Deficit']
+        gap = eco.state['Output_Gap']
         
         c5.metric("Fed Funds Rate", f"{eco.state['Interest_Rate']}%")
         c6.metric("Real Interest Rate", f"{real_rate:.1f}%", help="Nominal Rate - Inflation. If negative, policy is loose.")
-        c7.metric("Debt-to-GDP", f"{debt_gdp:.1f}%", help="Sustainable below 100%. Critical > 120%.")
-        c8.metric("Qtr Deficit", f"${int(deficit)}B", help="Gov Spending - Tax Revenue")
+        c7.metric("Output Gap", f"{gap:.1f}%", help="Positive = Overheating (Inflation risk), Negative = Recession.")
+        c8.metric("Debt-to-GDP", f"{debt_gdp:.1f}%", help="Sustainable below 100%. Critical > 120%.")
 
         # --- ADVISOR ---
         st.info(f"**Advisor:** {pol.get_advisor_comment(eco.state)}")
