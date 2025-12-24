@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import altair as alt
+import random
 from collections import deque
 from typing import Dict, List, Tuple
 
@@ -10,73 +11,76 @@ from typing import Dict, List, Tuple
 # ==============================================================================
 CONSTANTS = {
     'MPC': 0.75,          # Marginal Propensity to Consume
-    'ALPHA': 100,         # IS Curve Sensitivity (RECALIBRATED: Was 1500, now 100 for stability)
-    'BETA': 0.5,          # Phillips Curve Slope (Inflation Sensitivity)
+    'ALPHA': 100,         # IS Curve Sensitivity
+    'BETA': 0.5,          # Phillips Curve Slope
     'GAMMA': 0.4,         # Okun's Law Coefficient
-    'NATURAL_UNEMPLOYMENT': 5.0, # NAIRU (%)
-    'INFLATION_TARGET': 2.0,     # Target Inflation (%)
-    'POTENTIAL_GROWTH': 2.0,     # Annual Potential GDP Growth (%)
-    'DEPRECIATION': 0.05,        # Capital Depreciation
+    'NATURAL_UNEMPLOYMENT': 5.0, 
+    'INFLATION_TARGET': 2.0,     
+    'POTENTIAL_GROWTH': 2.0,     
+    'DEPRECIATION': 0.05,        
 }
 
 # ==============================================================================
 # MODULE 1: ECONOMIC ENGINE (MODEL)
-# Handles the "Physics" of the economy (IS-LM, Phillips Curve, Solow Growth)
 # ==============================================================================
 class EconomyModel:
     def __init__(self, scenario: str = "Standard"):
         self.turn = 0
+        self.month = 0
         self.history = []
+        self.active_event = None
         self._initialize_state(scenario)
         
-        # Policy Lag Mechanism: Stores past 2 quarters of interest rates
-        # Default starting rate is 4.0%
+        # Policy Lag Mechanism
         self.interest_rate_queue = deque([4.0, 4.0], maxlen=2)
 
     def _initialize_state(self, scenario: str):
         """Initialize the economy based on the selected scenario."""
-        # Baseline Defaults
         self.state = {
-            'GDP_Nominal': 20000,   # Billions
-            'GDP_Real': 20000,      # Billions
-            'Potential_GDP': 20000, # Billions
-            'Output_Gap': 0.0,      # %
+            'GDP_Nominal': 20000,
+            'GDP_Real': 20000,
+            'Potential_GDP': 20000,
+            'Output_Gap': 0.0,
             'Price_Level': 100.0,
-            'Inflation': 2.0,       # %
-            'Unemployment': 5.0,    # %
-            'Interest_Rate': 4.0,   # % (Fed Funds)
-            'Real_Interest_Rate': 2.0, # % (Real)
-            'Gov_Spending': 4000,   # Billions
-            'Tax_Revenue': 4000,    # Billions
-            'Deficit': 0,           # Billions
-            'Debt': 20000,          # Billions
-            'Debt_to_GDP': 100.0,   # %
-            'Supply_Shock': 0.0,    # Random noise
-            'Demand_Shock': 0.0,    # Random noise
+            'Inflation': 2.0,
+            'Unemployment': 5.0,
+            'Interest_Rate': 4.0,
+            'Real_Interest_Rate': 2.0,
+            'Gov_Spending': 4000,
+            'Tax_Revenue': 4000,
+            'Deficit': 0,
+            'Debt': 20000,
+            'Debt_to_GDP': 100.0,
+            'Supply_Shock': 0.0,
+            'Demand_Shock': 0.0,
         }
 
-        # Scenario Overrides
         if scenario == "Stagflation (1970s)":
             self.state['Inflation'] = 9.0
             self.state['Unemployment'] = 7.5
-            self.state['Supply_Shock'] = 3.0 # Persistent shock
+            self.state['Supply_Shock'] = 3.0
             
         elif scenario == "Financial Crisis (2008)":
             self.state['Inflation'] = 1.0
             self.state['Unemployment'] = 8.0
-            self.state['Demand_Shock'] = -1500 # Massive demand drop
+            self.state['Demand_Shock'] = -1500
             self.state['Interest_Rate'] = 0.5
 
-        # Record initial state
-        self._record_history()
+        # Initial history point
+        self._record_monthly_data(self.state, self.state, 0) 
 
     def step(self, user_inputs: Dict):
         """
-        Advances the economy by one turn (Quarter).
+        Advances the economy by one Quarter (3 Months).
         """
         self.turn += 1
+        prev_state = self.state.copy()
         
-        # 1. Unpack Inputs
+        # 1. Handle Random Events (Shocks for THIS turn)
+        # -----------------------------------------------
+        self._trigger_random_event()
+        
+        # 2. Unpack Inputs
         tax_rate = user_inputs['tax_rate']
         gov_spending = user_inputs['gov_spending']
         nominal_rate = user_inputs['interest_rate']
@@ -84,50 +88,42 @@ class EconomyModel:
         supply_investment = 100 if user_inputs['supply_reform'] else 0
         gov_spending += supply_investment
 
-        # 2. Monetary Policy Transmission (Lagged)
+        # 3. Monetary Policy Transmission
         self.interest_rate_queue.append(nominal_rate)
-        effective_nominal_rate = self.interest_rate_queue[0] # Pop the oldest
+        effective_nominal_rate = self.interest_rate_queue[0]
         
-        # Fisher Equation: r = i - pi^e
+        # Fisher Equation
         expected_inflation = self.state['Inflation']
         real_interest_rate = effective_nominal_rate - expected_inflation
 
-        # 3. The IS Curve (Aggregate Demand)
-        # Multiplier: 1 / (1 - MPC*(1-t))
+        # 4. IS Curve (Demand)
         multiplier = 1 / (1 - CONSTANTS['MPC'] * (1 - tax_rate))
-        
-        # Autonomous Demand & Constants Calculation
-        # Goal: At r=2%, Tax=20%, G=4000 -> Y should be 20,000.
-        # Multiplier = 2.5. Base Demand needed = 8000.
-        # Base = C0 + I0 + G - Alpha*r
-        # 8000 = 2500 (C0) + 1700 (I0) + 4000 (G) - 100*2 (Drag)
         
         autonomous_consumption = 2500 
         base_investment = 1700
         investment_sensitivity = CONSTANTS['ALPHA'] * real_interest_rate
         
-        shock_val = np.random.normal(0, 50)
-        scenario_demand_shock = self.state.get('Demand_Shock', 0)
+        # Add random noise + Event Shocks
+        noise_val = np.random.normal(0, 30)
+        total_demand_shock = self.state.get('Demand_Shock', 0) + noise_val
         
-        base_demand = autonomous_consumption + base_investment - investment_sensitivity + gov_spending + scenario_demand_shock + shock_val
+        base_demand = autonomous_consumption + base_investment - investment_sensitivity + gov_spending + total_demand_shock
         new_real_gdp = base_demand * multiplier
 
-        # 4. The Phillips Curve (Aggregate Supply)
+        # 5. Phillips Curve (Supply)
         potential_gdp = self.state['Potential_GDP']
         output_gap_percent = ((new_real_gdp - potential_gdp) / potential_gdp) * 100
         
-        scenario_supply_shock = self.state.get('Supply_Shock', 0)
-        random_supply_noise = np.random.normal(0, 0.2)
+        total_supply_shock = self.state.get('Supply_Shock', 0) + np.random.normal(0, 0.1)
         
-        # Adaptive Expectations with slight persistence dampening
-        new_inflation = expected_inflation + (CONSTANTS['BETA'] * output_gap_percent) + scenario_supply_shock + random_supply_noise
+        new_inflation = expected_inflation + (CONSTANTS['BETA'] * output_gap_percent) + total_supply_shock
         
-        # 5. Okun's Law (Unemployment)
+        # 6. Okun's Law
         new_unemployment = CONSTANTS['NATURAL_UNEMPLOYMENT'] - (CONSTANTS['GAMMA'] * output_gap_percent)
-        new_unemployment = max(0.5, new_unemployment) # Floor at 0.5%
+        new_unemployment = max(0.5, new_unemployment)
 
-        # 6. Long Run Updates
-        growth_rate = CONSTANTS['POTENTIAL_GROWTH'] / 4 # Quarterly
+        # 7. Long Run Updates
+        growth_rate = CONSTANTS['POTENTIAL_GROWTH'] / 4
         if user_inputs['supply_reform']:
             growth_rate += 0.2 
             
@@ -137,11 +133,8 @@ class EconomyModel:
         tax_revenue = new_real_gdp * tax_rate
         deficit = gov_spending - tax_revenue
         self.state['Debt'] += deficit
-        
-        # Price Level
         self.state['Price_Level'] *= (1 + new_inflation/100)
         
-        # Ratios
         new_nominal_gdp = new_real_gdp * (self.state['Price_Level'] / 100)
         debt_to_gdp = (self.state['Debt'] / new_nominal_gdp) * 100
 
@@ -160,19 +153,62 @@ class EconomyModel:
             'Debt_to_GDP': debt_to_gdp
         })
         
-        self._record_history()
+        # 8. Generate Monthly Interpolated History
+        self._record_monthly_data(prev_state, self.state, 3)
 
-    def _record_history(self):
-        snapshot = self.state.copy()
-        snapshot['Turn'] = self.turn
-        self.history.append(snapshot)
+    def _trigger_random_event(self):
+        """Randomly injects shocks into the economy."""
+        # Reset previous shocks slowly (mean reversion)
+        self.state['Demand_Shock'] *= 0.8
+        self.state['Supply_Shock'] *= 0.8
+        self.active_event = None
+
+        if random.random() < 0.25: # 25% chance per quarter
+            events = [
+                {"title": "Tech Breakthrough", "msg": "Productivity soars! Supply costs drop.", "supply": -1.5, "demand": 200},
+                {"title": "Oil Price Spike", "msg": "Energy costs rise. Inflation pressure increases.", "supply": 2.0, "demand": -100},
+                {"title": "Consumer Confidence Boom", "msg": "Households are spending aggressively.", "supply": 0.5, "demand": 800},
+                {"title": "Stock Market Correction", "msg": "Wealth effect evaporates. Consumption drops.", "supply": 0, "demand": -800},
+                {"title": "Global Trade Slowdown", "msg": "Exports fall. Demand weakens.", "supply": 0.2, "demand": -500},
+            ]
+            evt = random.choice(events)
+            self.state['Supply_Shock'] += evt['supply']
+            self.state['Demand_Shock'] += evt['demand']
+            self.active_event = evt
+
+    def _record_monthly_data(self, start_state, end_state, steps):
+        """Interpolates between start and end state to create monthly history."""
+        if steps == 0:
+            row = start_state.copy()
+            row['Turn'] = self.turn
+            row['Month'] = self.month
+            self.history.append(row)
+            return
+
+        for i in range(1, steps + 1):
+            fraction = i / steps
+            row = {}
+            for key in start_state:
+                if isinstance(start_state[key], (int, float)):
+                    val = start_state[key] + (end_state[key] - start_state[key]) * fraction
+                    # Add cosmetic noise for realism
+                    if key in ['Inflation', 'Unemployment', 'GDP_Real']:
+                         val += np.random.normal(0, 0.05 * abs(val))
+                    row[key] = val
+                else:
+                    row[key] = end_state[key]
+            
+            self.month += 1
+            row['Turn'] = self.turn
+            row['Month'] = self.month
+            self.history.append(row)
 
     def get_history_df(self):
         return pd.DataFrame(self.history)
 
 
 # ==============================================================================
-# MODULE 2: POLITICAL ENGINE (GAME LOGIC)
+# MODULE 2: POLITICAL ENGINE
 # ==============================================================================
 class PoliticalEngine:
     def __init__(self):
@@ -188,14 +224,15 @@ class PoliticalEngine:
         unemp_penalty = 2.0 * (unemp - CONSTANTS['NATURAL_UNEMPLOYMENT'])**2
         
         growth_bonus = 0
-        if len(history_df) > 1:
-            prev_gdp = history_df.iloc[-2]['GDP_Real']
+        # Calculate Year-over-Year Growth for stability
+        if len(history_df) > 12:
+            prev_gdp = history_df.iloc[-12]['GDP_Real']
             curr_gdp = economy_state['GDP_Real']
             growth = ((curr_gdp - prev_gdp) / prev_gdp) * 100
-            growth_bonus = growth * 5
+            growth_bonus = growth * 3
 
         current_score = 70 - inf_penalty - unemp_penalty + growth_bonus
-        self.approval = (0.7 * self.approval) + (0.3 * current_score)
+        self.approval = (0.8 * self.approval) + (0.2 * current_score) # More inertia
         self.approval = max(0, min(100, self.approval))
         
         return self.approval
@@ -203,80 +240,55 @@ class PoliticalEngine:
     def get_advisor_comment(self, state: Dict) -> str:
         inf = state['Inflation']
         unemp = state['Unemployment']
-        r_rate = state['Real_Interest_Rate']
         gap = state['Output_Gap']
         
         if inf > 8.0 and unemp > 7.0:
             return "⚠️ STAGFLATION: Prices rising AND jobs lost. Raising rates kills jobs; spending fuels inflation. Suggest: Structural reform + Careful rate hikes."
-        elif gap > 2.0:
-            return f"🔥 OVERHEATING (Gap: +{gap:.1f}%): The economy is producing way above capacity. This will cause massive inflation soon. Raise rates!"
-        elif gap < -2.0:
-            return f"❄️ RECESSION (Gap: {gap:.1f}%): We are well below potential output. Stimulate Demand via G or Tax cuts."
-        elif inf > 6.0:
-            msg = "⚠️ INFLATION ALERT: "
-            if r_rate < 0:
-                msg += "Your Real Interest Rate is NEGATIVE. You are pouring gas on the fire. Raise rates!"
-            else:
-                msg += "Consider raising taxes or cutting spending to cool demand."
-            return msg
+        elif gap > 2.5:
+            return f"🔥 OVERHEATING (Gap: +{gap:.1f}%): Economy is running too hot. Inflation will spiral if you don't cool it down (Rate hike or Tax hike)."
+        elif gap < -2.5:
+            return f"❄️ RECESSION (Gap: {gap:.1f}%): Output is far below potential. Stimulate Demand via Gov Spending or Tax cuts."
         elif state['Debt_to_GDP'] > 120:
-             return "📉 DEBT CRISIS: Debt-to-GDP is critical (>120%). Markets may lose confidence. Try to run a primary surplus."
+             return "📉 DEBT CRISIS: Debt > 120% GDP. Markets are panicking. You must reduce the deficit."
         else:
             return "✅ STABLE: Keep maintaining the balance. Watch the Output Gap."
 
     def check_game_over(self, turn: int) -> Tuple[bool, str]:
         if turn < 4:
             return False, ""
-
         if self.approval < 20:
             return True, "EJECTED: Approval Rating fell below 20%."
         if turn >= self.max_turns:
             return True, "TERM LIMIT: 5 Years completed."
         return False, ""
-
+    
     def analyze_failure(self, df: pd.DataFrame) -> str:
-        """Generates a post-mortem report on why the player failed."""
         avg_inf = df['Inflation'].mean()
         avg_unemp = df['Unemployment'].mean()
         final_debt = df.iloc[-1]['Debt_to_GDP']
         
         reasons = []
-        
-        if avg_inf > 5.0:
-            reasons.append(f"❌ **Runaway Inflation**: Averaged {avg_inf:.1f}%. You likely kept interest rates too low or spent too much when the economy was already at capacity.")
-        
-        if avg_unemp > 7.0:
-            reasons.append(f"❌ **Mass Unemployment**: Averaged {avg_unemp:.1f}%. You may have tightened policy too aggressively or failed to stimulate during a downturn.")
+        if avg_inf > 5.0: reasons.append(f"❌ **Runaway Inflation ({avg_inf:.1f}%)**: Rates were too low for too long.")
+        if avg_unemp > 7.0: reasons.append(f"❌ **Mass Unemployment ({avg_unemp:.1f}%)**: You suffocated the economy.")
+        if final_debt > 130.0: reasons.append(f"❌ **Fiscal Collapse ({final_debt:.1f}% Debt)**: You spent money you didn't have.")
             
-        if final_debt > 130.0:
-            reasons.append(f"❌ **Fiscal Irresponsibility**: Debt hit {final_debt:.1f}% of GDP. This creates long-term drag.")
-            
-        if not reasons:
-            return "⚠️ **Volatility**: The economy swung too wildly between boom and bust. Stability is key."
-            
-        return "\n\n".join(reasons)
+        return "\n\n".join(reasons) if reasons else "⚠️ **Volatility**: The economy swung too wildly."
 
 
 # ==============================================================================
-# MODULE 3: INTERFACE (VIEW/CONTROLLER)
+# MODULE 3: INTERFACE
 # ==============================================================================
 class SimulationUI:
     def __init__(self):
-        if 'economy' not in st.session_state:
-            st.session_state['economy'] = None
-        if 'politics' not in st.session_state:
-            st.session_state['politics'] = None
-        if 'game_active' not in st.session_state:
-            st.session_state['game_active'] = False
+        if 'economy' not in st.session_state: st.session_state['economy'] = None
+        if 'politics' not in st.session_state: st.session_state['politics'] = None
+        if 'game_active' not in st.session_state: st.session_state['game_active'] = False
 
     def render_sidebar(self):
         st.sidebar.title("🏛️ Oval Office")
         
         if not st.session_state['game_active']:
-            scenario = st.sidebar.selectbox(
-                "Choose Scenario", 
-                ["Standard", "Stagflation (1970s)", "Financial Crisis (2008)"]
-            )
+            scenario = st.sidebar.selectbox("Choose Scenario", ["Standard", "Stagflation (1970s)", "Financial Crisis (2008)"])
             if st.sidebar.button("Start New Term"):
                 st.session_state['economy'] = EconomyModel(scenario)
                 st.session_state['politics'] = PoliticalEngine()
@@ -285,45 +297,26 @@ class SimulationUI:
             return None
         
         st.sidebar.markdown("### 🕹️ Policy Levers")
-        
         with st.sidebar.form("policy_form"):
             st.sidebar.markdown("#### Fiscal Policy")
-            gov_spending = st.slider(
-                "Government Spending ($B)", 
-                min_value=2000, max_value=8000, 
-                value=int(st.session_state['economy'].state['Gov_Spending']),
-                step=100,
-                help="Directly increases Aggregate Demand."
-            )
+            gov_spending = st.slider("Government Spending ($B)", 2000, 8000, int(st.session_state['economy'].state['Gov_Spending']), 100)
             
-            tax_rate = st.slider(
-                "Income Tax Rate (%)", 
-                min_value=10, max_value=60, 
-                value=int(st.session_state['economy'].state.get('Tax_Revenue', 4000) / st.session_state['economy'].state['GDP_Real'] * 100), # Approx start
-                step=1
-            ) / 100.0
+            # Tax Rate
+            curr_tax_revenue = st.session_state['economy'].state.get('Tax_Revenue', 4000)
+            curr_gdp = st.session_state['economy'].state['GDP_Real']
+            # Safety check for zero div
+            default_tax = int((curr_tax_revenue / curr_gdp * 100)) if curr_gdp > 0 else 20
+            
+            tax_rate = st.slider("Income Tax Rate (%)", 10, 60, default_tax, 1) / 100.0
 
             st.sidebar.markdown("#### Monetary Policy")
-            interest_rate = st.slider(
-                "Fed Funds Rate (%)",
-                min_value=0.0, max_value=20.0,
-                value=float(st.session_state['economy'].state['Interest_Rate']),
-                step=0.25,
-                help="Lagged effect: 6 months."
-            )
+            interest_rate = st.slider("Fed Funds Rate (%)", 0.0, 20.0, float(st.session_state['economy'].state['Interest_Rate']), 0.25)
 
             st.sidebar.markdown("#### Structural Reform")
             supply_reform = st.checkbox("Invest in Education/Infra ($100B)")
 
-            submitted = st.form_submit_button("📢 Execute Policy (Next Quarter)")
-            
-            if submitted:
-                inputs = {
-                    'gov_spending': gov_spending,
-                    'tax_rate': tax_rate,
-                    'interest_rate': interest_rate,
-                    'supply_reform': supply_reform
-                }
+            if st.form_submit_button("📢 Execute Policy (Next Quarter)"):
+                inputs = {'gov_spending': gov_spending, 'tax_rate': tax_rate, 'interest_rate': interest_rate, 'supply_reform': supply_reform}
                 self.process_turn(inputs)
 
         if st.sidebar.button("Resign (Reset Game)"):
@@ -333,10 +326,8 @@ class SimulationUI:
     def process_turn(self, inputs):
         eco = st.session_state['economy']
         pol = st.session_state['politics']
-        
         eco.step(inputs)
         pol.calculate_approval(eco.state, eco.get_history_df())
-        
         st.rerun()
 
     def render_dashboard(self):
@@ -350,62 +341,54 @@ class SimulationUI:
         pol = st.session_state['politics']
         df = eco.get_history_df()
         
-        # --- TOP LEVEL METRICS ---
+        # --- HEADLINES & EVENTS ---
+        if eco.active_event:
+            st.warning(f"📰 **BREAKING NEWS: {eco.active_event['title']}** — {eco.active_event['msg']}")
         
-        # Row 1: The "Big Three" + Approval
+        # --- TOP METRICS ---
         c1, c2, c3, c4 = st.columns(4)
         curr_inf = eco.state['Inflation']
         curr_unemp = eco.state['Unemployment']
         curr_gdp = eco.state['GDP_Real']
-        curr_app = pol.approval
         
-        prev_inf = df.iloc[-2]['Inflation'] if len(df) > 1 else curr_inf
-        prev_unemp = df.iloc[-2]['Unemployment'] if len(df) > 1 else curr_unemp
-        
-        c1.metric("Inflation", f"{curr_inf:.1f}%", f"{(curr_inf-prev_inf):.1f}%", delta_color="inverse")
-        c2.metric("Unemployment", f"{curr_unemp:.1f}%", f"{(curr_unemp-prev_unemp):.1f}%", delta_color="inverse")
+        # Get Delta from 3 months ago (Previous Quarter)
+        if len(df) > 3:
+            prev_row = df.iloc[-4]
+            d_inf = curr_inf - prev_row['Inflation']
+            d_unemp = curr_unemp - prev_row['Unemployment']
+        else:
+            d_inf, d_unemp = 0, 0
+            
+        c1.metric("Inflation", f"{curr_inf:.1f}%", f"{d_inf:+.1f}%", delta_color="inverse")
+        c2.metric("Unemployment", f"{curr_unemp:.1f}%", f"{d_unemp:+.1f}%", delta_color="inverse")
         c3.metric("Real GDP", f"${int(curr_gdp):,}B", "Growth")
-        c4.metric("Approval", f"{int(curr_app)}%", f"Turn {eco.turn}/20")
+        c4.metric("Approval", f"{int(pol.approval)}%", f"Turn {eco.turn}/20")
         
-        # Row 2: Advanced Indicators (Requested by User)
-        st.markdown("---")
-        c5, c6, c7, c8 = st.columns(4)
-        
-        real_rate = eco.state['Real_Interest_Rate']
-        debt_gdp = eco.state['Debt_to_GDP']
-        gap = eco.state['Output_Gap']
-        
-        c5.metric("Fed Funds Rate", f"{eco.state['Interest_Rate']}%")
-        c6.metric("Real Interest Rate", f"{real_rate:.1f}%", help="Nominal Rate - Inflation. If negative, policy is loose.")
-        c7.metric("Output Gap", f"{gap:.1f}%", help="Positive = Overheating (Inflation risk), Negative = Recession.")
-        c8.metric("Debt-to-GDP", f"{debt_gdp:.1f}%", help="Sustainable below 100%. Critical > 120%.")
+        # --- QUARTERLY BRIEFING ---
+        with st.expander("📋 Quarterly Briefing (Click to Expand)", expanded=True):
+            cols = st.columns(3)
+            cols[0].info(f"**Advisor:** {pol.get_advisor_comment(eco.state)}")
+            cols[1].metric("Output Gap", f"{eco.state['Output_Gap']:.1f}%", help="Positive=Overheating, Negative=Recession")
+            cols[2].metric("Debt-to-GDP", f"{eco.state['Debt_to_GDP']:.1f}%")
 
-        # --- ADVISOR ---
-        st.info(f"**Advisor:** {pol.get_advisor_comment(eco.state)}")
-
-        # --- GAME OVER LOGIC ---
+        # --- GAME OVER ---
         is_over, reason = pol.check_game_over(eco.turn)
         if is_over:
             st.error(f"GAME OVER: {reason}")
-            
-            st.markdown("### 📋 Post-Mortem Analysis")
             st.markdown(pol.analyze_failure(df))
-            
-            with st.expander("Review Full Term Data"):
-                st.dataframe(df)
-            
             if st.button("Start New Game"):
                 st.session_state['game_active'] = False
                 st.rerun()
             return
 
         # --- CHARTS ---
-        tab1, tab2, tab3 = st.tabs(["📊 Main Indicators", "🌀 Phillips Curve", "💰 Debt & Rates"])
+        tab1, tab2, tab3 = st.tabs(["📊 Monthly Trends", "🌀 Phillips Curve", "💰 Debt & Rates"])
         
         with tab1:
-            base = alt.Chart(df).encode(x='Turn')
-            line_inf = base.mark_line(color='red').encode(y='Inflation')
-            line_unemp = base.mark_line(color='blue').encode(y='Unemployment')
+            # Use 'Month' instead of 'Turn'
+            base = alt.Chart(df).encode(x=alt.X('Month', title="Month (3 per Quarter)"))
+            line_inf = base.mark_line(color='red', strokeWidth=3).encode(y='Inflation')
+            line_unemp = base.mark_line(color='blue', strokeWidth=3).encode(y='Unemployment')
             st.altair_chart((line_inf + line_unemp).interactive(), use_container_width=True)
             st.caption("Red: Inflation | Blue: Unemployment")
 
@@ -414,28 +397,23 @@ class SimulationUI:
                 x=alt.X('Unemployment', scale=alt.Scale(domain=[0, 15])),
                 y=alt.Y('Inflation', scale=alt.Scale(domain=[-2, 15])),
                 color=alt.value('purple'),
-                tooltip=['Turn', 'Inflation', 'Unemployment']
+                tooltip=['Month', 'Inflation', 'Unemployment']
             ).properties(title="Phillips Curve Path")
             line_pc = alt.Chart(df).mark_line(color='gray', strokeDash=[5,5]).encode(
-                x='Unemployment', y='Inflation', order='Turn'
+                x='Unemployment', y='Inflation', order='Month'
             )
             st.altair_chart(chart_pc + line_pc, use_container_width=True)
 
         with tab3:
-            # Debt Ratio & Real Rate
             col_a, col_b = st.columns(2)
             with col_a:
-                st.markdown("**Debt-to-GDP (%)**")
                 chart_debt = alt.Chart(df).mark_area(color='darkred', opacity=0.5).encode(
-                    x='Turn', y=alt.Y('Debt_to_GDP', scale=alt.Scale(domain=[80, 150]))
+                    x='Month', y=alt.Y('Debt_to_GDP', scale=alt.Scale(domain=[80, 150]))
                 )
                 st.altair_chart(chart_debt, use_container_width=True)
             with col_b:
-                st.markdown("**Real Interest Rate (%)**")
                 df['Zero_Line'] = 0
-                chart_rate = alt.Chart(df).mark_line(color='green').encode(
-                    x='Turn', y='Real_Interest_Rate'
-                )
+                chart_rate = alt.Chart(df).mark_line(color='green').encode(x='Month', y='Real_Interest_Rate')
                 rule = alt.Chart(df).mark_rule(color='black').encode(y='Zero_Line')
                 st.altair_chart(chart_rate + rule, use_container_width=True)
 
