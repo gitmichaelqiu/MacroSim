@@ -30,6 +30,7 @@ class EconomyModel:
         self.history = []
         self.active_event = None
         self._initialize_state(scenario)
+        self.scenario_name = scenario
         
         # Policy Lag Mechanism
         self.interest_rate_queue = deque([4.0, 4.0], maxlen=2)
@@ -163,6 +164,9 @@ class EconomyModel:
         self.state['Supply_Shock'] *= 0.8
         self.active_event = None
 
+        if self.scenario_name == "Sandbox Mode":
+            return # Less chaos in sandbox
+
         if random.random() < 0.25: # 25% chance per quarter
             events = [
                 {"title": "Tech Breakthrough", "msg": "Productivity soars! Supply costs drop.", "supply": -1.5, "demand": 200},
@@ -253,7 +257,10 @@ class PoliticalEngine:
         else:
             return "✅ STABLE: Keep maintaining the balance. Watch the Output Gap."
 
-    def check_game_over(self, turn: int) -> Tuple[bool, str]:
+    def check_game_over(self, turn: int, scenario: str) -> Tuple[bool, str]:
+        if scenario == "Sandbox Mode":
+            return False, "" # Sandbox never ends
+            
         if turn < 4:
             return False, ""
         if self.approval < 20:
@@ -336,9 +343,84 @@ class PoliticalEngine:
             
         return report
 
+# ==============================================================================
+# MODULE 3: VISUALIZATION HELPERS (THEORY LAB)
+# ==============================================================================
+def get_adas_chart(current_gdp, potential_gdp, price_level, gov_spending_delta=0):
+    """
+    Generates stylized AD-AS curves.
+    AD shifts based on user's hypothetical Gov Spending change.
+    """
+    # Create Data Range centered on Potential GDP
+    x = np.linspace(potential_gdp * 0.8, potential_gdp * 1.2, 100)
+    
+    # LRAS: Vertical Line
+    lras_df = pd.DataFrame({'GDP': [potential_gdp, potential_gdp], 'Price': [80, 120], 'Type': ['LRAS', 'LRAS']})
+    
+    # SRAS: Upward Sloping
+    # P = P_expected + slope * (Y - Y_pot)
+    slope_sras = 0.002
+    sras_y = price_level + slope_sras * (x - potential_gdp)
+    sras_df = pd.DataFrame({'GDP': x, 'Price': sras_y, 'Type': ['SRAS']*100})
+    
+    # AD: Downward Sloping
+    # P = Intercept - slope * Y
+    # We calibrate Intercept so that AD crosses SRAS at current_gdp (or close to it)
+    slope_ad = 0.003
+    
+    # Base AD intercept based on current equilibrium
+    base_intercept = price_level + slope_ad * current_gdp
+    
+    # Shift AD based on Gov Spending Delta (Visual Feedback)
+    # Delta G * Multiplier (approx 4) -> Shift in Y at same P
+    shift_y = gov_spending_delta * 3.0 
+    
+    # Inverse AD: Y = (Intercept - P) / slope. 
+    # New Y = Old Y + Shift.
+    # So P = Intercept - slope * (Y - Shift)
+    ad_y = base_intercept - slope_ad * (x - shift_y)
+    
+    ad_df = pd.DataFrame({'GDP': x, 'Price': ad_y, 'Type': ['AD (Aggregate Demand)']*100})
+    
+    final_df = pd.concat([lras_df, sras_df, ad_df])
+    
+    chart = alt.Chart(final_df).mark_line().encode(
+        x=alt.X('GDP', scale=alt.Scale(domain=[potential_gdp*0.8, potential_gdp*1.2])),
+        y=alt.Y('Price', scale=alt.Scale(domain=[90, 110])),
+        color='Type',
+        tooltip=['GDP', 'Price']
+    ).properties(title="Aggregate Demand & Supply Model")
+    
+    return chart
+
+def get_money_market_chart(money_supply, interest_rate):
+    """Generates Money Market Diagram."""
+    # MS: Vertical
+    ms_x = [money_supply, money_supply]
+    ms_y = [0, 15]
+    ms_df = pd.DataFrame({'Money': ms_x, 'Interest': ms_y, 'Type': ['Money Supply']*2})
+    
+    # MD: Downward
+    x = np.linspace(money_supply * 0.5, money_supply * 1.5, 100)
+    # i = A - bM
+    slope = 0.01
+    intercept = interest_rate + slope * money_supply
+    md_y = intercept - slope * x
+    md_df = pd.DataFrame({'Money': x, 'Interest': md_y, 'Type': ['Money Demand']*100})
+    
+    final_df = pd.concat([ms_df, md_df])
+    
+    chart = alt.Chart(final_df).mark_line().encode(
+        x=alt.X('Money', title="Quantity of Money"),
+        y=alt.Y('Interest', title="Interest Rate (%)"),
+        color='Type'
+    ).properties(title="Money Market (Liquidity Preference)")
+    
+    return chart
+
 
 # ==============================================================================
-# MODULE 3: INTERFACE
+# MODULE 4: INTERFACE
 # ==============================================================================
 class SimulationUI:
     def __init__(self):
@@ -350,7 +432,7 @@ class SimulationUI:
         st.sidebar.title("🏛️ Oval Office")
         
         if not st.session_state['game_active']:
-            scenario = st.sidebar.selectbox("Choose Scenario", ["Standard", "Stagflation (1970s)", "Financial Crisis (2008)"])
+            scenario = st.sidebar.selectbox("Choose Scenario", ["Standard", "Sandbox Mode", "Stagflation (1970s)", "Financial Crisis (2008)"])
             if st.sidebar.button("Start New Term"):
                 st.session_state['economy'] = EconomyModel(scenario)
                 st.session_state['politics'] = PoliticalEngine()
@@ -359,16 +441,21 @@ class SimulationUI:
             return None
         
         st.sidebar.markdown("### 🕹️ Policy Levers")
+        
+        # --- INPUTS ---
+        # We capture these inputs to generate the "Theory Lab" preview
+        
         with st.sidebar.form("policy_form"):
             st.sidebar.markdown("#### Fiscal Policy")
-            gov_spending = st.slider("Government Spending ($B)", 2000, 8000, int(st.session_state['economy'].state['Gov_Spending']), 100)
+            
+            # Current G for reference
+            current_g = int(st.session_state['economy'].state['Gov_Spending'])
+            gov_spending = st.slider("Government Spending ($B)", 2000, 8000, current_g, 100)
             
             # Tax Rate
             curr_tax_revenue = st.session_state['economy'].state.get('Tax_Revenue', 4000)
             curr_gdp = st.session_state['economy'].state['GDP_Real']
-            # Safety check for zero div
             default_tax = int((curr_tax_revenue / curr_gdp * 100)) if curr_gdp > 0 else 20
-            
             tax_rate = st.slider("Income Tax Rate (%)", 10, 60, default_tax, 1) / 100.0
 
             st.sidebar.markdown("#### Monetary Policy")
@@ -381,6 +468,9 @@ class SimulationUI:
                 inputs = {'gov_spending': gov_spending, 'tax_rate': tax_rate, 'interest_rate': interest_rate, 'supply_reform': supply_reform}
                 self.process_turn(inputs)
 
+        # Store current input state for the Theory Lab visualization
+        self.current_inputs = {'G': gov_spending, 'T': tax_rate, 'i': interest_rate}
+        
         if st.sidebar.button("Resign (Reset Game)"):
             st.session_state['game_active'] = False
             st.rerun()
@@ -413,7 +503,6 @@ class SimulationUI:
         curr_unemp = eco.state['Unemployment']
         curr_gdp = eco.state['GDP_Real']
         
-        # Get Delta from 3 months ago (Previous Quarter)
         if len(df) > 3:
             prev_row = df.iloc[-4]
             d_inf = curr_inf - prev_row['Inflation']
@@ -424,7 +513,11 @@ class SimulationUI:
         c1.metric("Inflation", f"{curr_inf:.1f}%", f"{d_inf:+.1f}%", delta_color="inverse")
         c2.metric("Unemployment", f"{curr_unemp:.1f}%", f"{d_unemp:+.1f}%", delta_color="inverse")
         c3.metric("Real GDP", f"${int(curr_gdp):,}B", "Growth")
-        c4.metric("Approval", f"{int(pol.approval)}%", f"Turn {eco.turn}/20")
+        
+        if eco.scenario_name == "Sandbox Mode":
+            c4.metric("Mode", "Sandbox", "Infinite Turns")
+        else:
+            c4.metric("Approval", f"{int(pol.approval)}%", f"Turn {eco.turn}/20")
         
         # --- QUARTERLY BRIEFING ---
         with st.expander("📋 Quarterly Briefing (Click to Expand)", expanded=True):
@@ -434,7 +527,7 @@ class SimulationUI:
             cols[2].metric("Debt-to-GDP", f"{eco.state['Debt_to_GDP']:.1f}%")
 
         # --- GAME OVER ---
-        is_over, reason = pol.check_game_over(eco.turn)
+        is_over, reason = pol.check_game_over(eco.turn, eco.scenario_name)
         if is_over:
             if "EJECTED" in reason:
                 st.error(f"GAME OVER: {reason}")
@@ -449,10 +542,9 @@ class SimulationUI:
             return
 
         # --- CHARTS ---
-        tab1, tab2, tab3 = st.tabs(["📊 Monthly Trends", "🌀 Phillips Curve", "💰 Debt & Rates"])
+        tab1, tab2, tab3, tab4 = st.tabs(["📊 Monthly Trends", "📉 Theory Lab (AD-AS)", "🌀 Phillips Curve", "💰 Debt & Rates"])
         
         with tab1:
-            # Use 'Month' instead of 'Turn'
             base = alt.Chart(df).encode(x=alt.X('Month', title="Month (3 per Quarter)"))
             line_inf = base.mark_line(color='red', strokeWidth=3).encode(y='Inflation')
             line_unemp = base.mark_line(color='blue', strokeWidth=3).encode(y='Unemployment')
@@ -460,6 +552,35 @@ class SimulationUI:
             st.caption("Red: Inflation | Blue: Unemployment")
 
         with tab2:
+            st.markdown("#### Real-Time Structural Analysis")
+            st.markdown("These charts update *instantly* as you move the sliders on the left, visualizing the theoretical impact of your choices.")
+            
+            col_ad, col_money = st.columns(2)
+            
+            # AD-AS Chart Calculation
+            current_g = eco.state['Gov_Spending']
+            proposed_g = self.current_inputs['G']
+            delta_g = proposed_g - current_g
+            
+            adas_chart = get_adas_chart(
+                current_gdp=eco.state['GDP_Real'],
+                potential_gdp=eco.state['Potential_GDP'],
+                price_level=eco.state['Price_Level'],
+                gov_spending_delta=delta_g
+            )
+            col_ad.altair_chart(adas_chart, use_container_width=True)
+            col_ad.caption("The **Aggregate Demand (AD)** curve shifts Right as G increases.")
+            
+            # Money Market Calculation
+            # Simplified: Higher Interest Rate -> Lower Money Supply needed (Tightening)
+            # Invert: Money Supply implied by Interest Rate
+            implied_ms = 10000 - (self.current_inputs['i'] * 400)
+            
+            money_chart = get_money_market_chart(implied_ms, self.current_inputs['i'])
+            col_money.altair_chart(money_chart, use_container_width=True)
+            col_money.caption("The Fed adjusts **Money Supply (MS)** to hit the target Interest Rate.")
+
+        with tab3:
             chart_pc = alt.Chart(df).mark_circle(size=60).encode(
                 x=alt.X('Unemployment', scale=alt.Scale(domain=[0, 15])),
                 y=alt.Y('Inflation', scale=alt.Scale(domain=[-2, 15])),
@@ -471,7 +592,7 @@ class SimulationUI:
             )
             st.altair_chart(chart_pc + line_pc, use_container_width=True)
 
-        with tab3:
+        with tab4:
             col_a, col_b = st.columns(2)
             with col_a:
                 chart_debt = alt.Chart(df).mark_area(color='darkred', opacity=0.5).encode(
