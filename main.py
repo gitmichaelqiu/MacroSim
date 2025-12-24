@@ -112,7 +112,8 @@ class EconomyModel:
         multiplier = 1 / (1 - CONSTANTS['MPC'] * (1 - tax_rate))
         
         # Autonomous Demand Components
-        autonomous_consumption = 2000 # Base survival consumption
+        # RECALIBRATED: Increased to 4000 to balance equation at G=4000, Y=20000
+        autonomous_consumption = 4000 
         investment_sensitivity = CONSTANTS['ALPHA'] * real_interest_rate
         
         # Stochastic Shocks (Randomness)
@@ -121,6 +122,7 @@ class EconomyModel:
         
         # Aggregate Demand Calculation
         # AD = (C0 + I0 - alpha*r + G) * Multiplier
+        # Note: '3000' is the base Investment constant.
         base_demand = autonomous_consumption + 3000 - investment_sensitivity + gov_spending + scenario_demand_shock + shock_val
         new_real_gdp = base_demand * multiplier
 
@@ -188,7 +190,7 @@ class EconomyModel:
 # ==============================================================================
 class PoliticalEngine:
     def __init__(self):
-        self.approval = 50.0
+        self.approval = 60.0 # Started higher to give buffer
         self.max_turns = 20 # 5 Years (Quarters)
 
     def calculate_approval(self, economy_state: Dict, history_df: pd.DataFrame) -> float:
@@ -238,6 +240,10 @@ class PoliticalEngine:
             return "✅ STABLE: The economy is tracking well. Keep maintaining the balance between growth and stability."
 
     def check_game_over(self, turn: int) -> Tuple[bool, str]:
+        # Honeymoon period: Can't lose in first year (4 turns)
+        if turn < 4:
+            return False, ""
+
         if self.approval < 20:
             return True, "You have been voted out of office due to historically low approval ratings."
         if turn >= self.max_turns:
